@@ -20,6 +20,7 @@ from openai_server import (APIError, APIHandler, APIServer, ClientCancelled,
                            DEFAULT_CHAT_STOP_SEQUENCES, END, GenerationScheduler,
                            READY, Engine, InklingStreamSplit, StopFilter, ThinkingStreamSplit,
                            _engine_error, _image_bytes_from_url, cap_for_arch,
+                           expand_dsv41_images, expand_glm53_images, expand_qwen38_images,
                            conversation_cache_slot, model_arch,
                            generation_options, parse_tool_calls, parse_dsv4_tool_calls,
                            parse_arch_tool_calls, parse_k3_tool_calls, parse_qwen38_tool_calls,
@@ -2271,6 +2272,43 @@ class ClientHangupTest(unittest.TestCase):
         with urlopen(f"http://127.0.0.1:{self.server.server_port}/health",
                      timeout=2) as response:
             self.assertEqual(json.load(response)["status"], "ok")
+
+
+class ImageDependencyTest(unittest.TestCase):
+    """The image preprocessors import Pillow and numpy only when they are called, so a
+    missing package surfaced mid-request: a 500 for GLM-5.3, and for Qwen3.8 and
+    DeepSeek V4.1 a SystemExit that ended the handler thread without any response.
+    Masking the modules makes this deterministic whether or not they are installed."""
+
+    MISSING = {"numpy": None, "PIL": None, "PIL.Image": None}
+    EXPANDERS = (expand_glm53_images, expand_qwen38_images, expand_dsv41_images)
+
+    @staticmethod
+    def _messages():
+        return [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}]}]
+
+    def test_missing_imaging_packages_are_a_400_for_every_vision_family(self):
+        with patch.dict(sys.modules, self.MISSING):
+            for expand in self.EXPANDERS:
+                with self.subTest(expand=expand.__name__):
+                    with self.assertRaises(APIError) as caught:
+                        expand(self._messages(), "/nonexistent")
+                    self.assertEqual(caught.exception.status, 400)
+                    self.assertIn("Pillow and numpy", caught.exception.message)
+
+    def test_image_requests_do_not_grow_sys_path(self):
+        def send_all():
+            for expand in self.EXPANDERS:
+                with self.assertRaises(APIError):
+                    expand(self._messages(), "/nonexistent")
+
+        with patch.dict(sys.modules, self.MISSING):
+            send_all()                       # the first request may add tools/ once
+            before = list(sys.path)
+            for _ in range(5):
+                send_all()
+        self.assertEqual(sys.path, before)
 
 
 class StaticServingTest(unittest.TestCase):
