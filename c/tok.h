@@ -238,7 +238,51 @@ static void tok_load(Tok *T, const char *path){
     T->json_root=root;
 }
 
-/* ---------- BPE su un pezzo: byte grezzi [a,b) -> id appesi a out ---------- */
+/* ---------- BPE su un pezzo: byte grezzi [a,b) -> id appesi a out ----------
+ * Fonde sempre la coppia adiacente di rank minimo, a parita' di rank la piu' a
+ * sinistra, finche' ce n'e' una -- la stessa regola di HF tokenizers e di
+ * tiktoken. Rifare la scansione di tutte le coppie dopo ogni fusione costava
+ * O(n^2) per pezzo: un pezzo da 64 KB (una riga di '=' o di lettere senza spazi,
+ * che il pre-tokenizer non spezza) chiedeva ~40 s, e il server accetta 4 MB.
+ * Qui le coppie stanno in un min-heap ordinato per (rank, posizione): O(n log n).
+ * Una voce dello heap ricorda le lunghezze dei due simboli quando e' entrata; i
+ * simboli crescono soltanto, e il sinistro non si sposta, quindi se una delle
+ * due e' cambiata (o il destro e' stato assorbito, lunghezza 0) la coppia non
+ * esiste piu' e la voce si scarta. */
+typedef struct { int rank, left, right, llen, rlen; } bpe_pair;
+
+static int bpe_pair_before(const bpe_pair *a, const bpe_pair *b){
+    return a->rank < b->rank || (a->rank == b->rank && a->left < b->left);
+}
+static void bpe_heap_push(bpe_pair *h, int *n, bpe_pair e){
+    int i = (*n)++;
+    while (i > 0) {
+        int up = (i - 1) / 2;
+        if (!bpe_pair_before(&e, &h[up])) break;
+        h[i] = h[up]; i = up;
+    }
+    h[i] = e;
+}
+static bpe_pair bpe_heap_pop(bpe_pair *h, int *n){
+    bpe_pair top = h[0], last = h[--(*n)];
+    int i = 0;
+    for (;;) {
+        int c = 2*i + 1;
+        if (c >= *n) break;
+        if (c + 1 < *n && bpe_pair_before(&h[c+1], &h[c])) c++;
+        if (!bpe_pair_before(&h[c], &last)) break;
+        h[i] = h[c]; i = c;
+    }
+    h[i] = last;
+    return top;
+}
+/* rank della fusione dei simboli adiacenti l|r (contigui in s), -1 se non esiste */
+static int bpe_rank(Tok *T, const char *s, const int *soff, const int *slen, int l, int r, char *kbuf){
+    int ll = slen[l], rl = slen[r];
+    if (T->rankbpe) return hm_get(&T->vocab, s + soff[l], ll + rl);   /* tiktoken: rank della CONCATENAZIONE */
+    memcpy(kbuf, s + soff[l], ll); kbuf[ll] = 0; memcpy(kbuf + ll + 1, s + soff[r], rl);
+    return hm_get(&T->merges, kbuf, ll + 1 + rl);
+}
 static void bpe_piece(Tok *T, const unsigned char *p, int a, int b, int *out, int *no, int max){
     int nb=b-a;
     /* stringa byte-level (concatenazione di byte2str): <=2 byte per byte di input */
@@ -248,34 +292,36 @@ static void bpe_piece(Tok *T, const unsigned char *p, int a, int b, int *out, in
     /* ignore_merges: se l'intero pezzo e' un token, emettilo diretto */
     int whole=hm_get(&T->vocab,s,sl);
     if(whole>=0){ if(*no<max) out[(*no)++]=whole; free(s); return; }
-    /* simboli iniziali = codepoint della stringa byte-level */
-    int *soff=malloc((sl+1)*sizeof(int)), *slen=malloc((sl+1)*sizeof(int)); int ns=0;
+    /* simboli iniziali = codepoint della stringa byte-level, in lista doppia */
+    int *soff=malloc(4*(size_t)(sl+1)*sizeof(int));
+    int *slen=soff+(sl+1), *nxt=slen+(sl+1), *prv=nxt+(sl+1); int ns=0;
     for(int i=0;i<sl;){ uint32_t cp; int k=u8_next((const unsigned char*)s,sl,i,&cp);
         soff[ns]=i; slen[ns]=k; ns++; i+=k; }
+    for(int i=0;i<ns;i++){ prv[i]=i-1; nxt[i]=(i+1<ns)?i+1:-1; }
     char *kbuf=malloc(2*sl+2);
-    for(;;){
-        int best=INT_MAX, bp=-1;
-        for(int i=0;i+1<ns;i++){
-            int ll=slen[i], rl=slen[i+1];
-            int rk;
-            if(T->rankbpe){                                /* tiktoken: rank of the CONCATENATION */
-                rk=hm_get(&T->vocab,s+soff[i],ll+rl);      /* contigui in s */
-            } else {
-                memcpy(kbuf,s+soff[i],ll); kbuf[ll]=0; memcpy(kbuf+ll+1,s+soff[i+1],rl);
-                rk=hm_get(&T->merges,kbuf,ll+1+rl);
-            }
-            if(rk>=0 && rk<best){ best=rk; bp=i; }
-        }
-        if(bp<0) break;
-        slen[bp]=soff[bp+1]+slen[bp+1]-soff[bp];          /* fonde bp e bp+1 (contigui in s) */
-        for(int j=bp+1;j<ns-1;j++){ soff[j]=soff[j+1]; slen[j]=slen[j+1]; }
-        ns--;
+    /* <= ns-1 coppie iniziali, poi al piu' 2 per fusione */
+    bpe_pair *heap=malloc((3*(size_t)ns+1)*sizeof(bpe_pair)); int hn=0;
+    for(int i=0;i+1<ns;i++){
+        int rk=bpe_rank(T,s,soff,slen,i,i+1,kbuf);
+        if(rk>=0) bpe_heap_push(heap,&hn,(bpe_pair){rk,i,i+1,slen[i],slen[i+1]});
     }
-    for(int i=0;i<ns;i++){
+    while(hn>0){
+        bpe_pair e=bpe_heap_pop(heap,&hn);
+        int l=e.left, r=e.right;
+        if(slen[l]!=e.llen || slen[r]!=e.rlen || nxt[l]!=r) continue;   /* coppia scaduta */
+        slen[l]=soff[r]+slen[r]-soff[l];                  /* fonde l e r (contigui in s) */
+        slen[r]=0;
+        nxt[l]=nxt[r]; if(nxt[l]>=0) prv[nxt[l]]=l;
+        if(prv[l]>=0){ int q=prv[l], rk=bpe_rank(T,s,soff,slen,q,l,kbuf);
+            if(rk>=0) bpe_heap_push(heap,&hn,(bpe_pair){rk,q,l,slen[q],slen[l]}); }
+        if(nxt[l]>=0){ int q=nxt[l], rk=bpe_rank(T,s,soff,slen,l,q,kbuf);
+            if(rk>=0) bpe_heap_push(heap,&hn,(bpe_pair){rk,l,q,slen[l],slen[q]}); }
+    }
+    for(int i=ns?0:-1;i>=0;i=nxt[i]){                     /* il simbolo 0 non viene mai assorbito */
         int id=hm_get(&T->vocab,s+soff[i],slen[i]);
         if(id>=0 && *no<max) out[(*no)++]=id;
     }
-    free(s); free(soff); free(slen); free(kbuf);
+    free(s); free(soff); free(kbuf); free(heap);
 }
 
 /* ---------- pre-tokenizer regex (pattern cl100k) su una porzione di testo ----------
