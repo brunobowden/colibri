@@ -4,8 +4,12 @@ on:
   push:
     tags: ['v*']
 
+# Read-only by default. Only the `release` job writes (it creates the GitHub
+# Release and uploads the archives). The build matrix runs third-party code --
+# `npm ci` install scripts, Homebrew, MSYS2 packages -- and needs no write
+# access to the repository, so it must not hold a token that has it.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -39,6 +43,10 @@ jobs:
         shell: ${{ matrix.shell || 'bash' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing in this job pushes; do not leave the token in .git/config
+          # where every later build step (npm install scripts included) can read it.
+          persist-credentials: false
 
       - if: matrix.os == 'windows-latest'
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
@@ -281,8 +289,12 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write     # gh release create / upload
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # gh authenticates with GH_TOKEN below, not git
 
       - uses: actions/download-artifact@v4
         with:
