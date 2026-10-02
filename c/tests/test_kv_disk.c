@@ -37,6 +37,32 @@ int main(void){
         for(int j=0;j<m.c.kv_lora;j++)
             CHECK(m.Lc[i][(int64_t)p*m.c.kv_lora+j]==fill(i,p,j), "v1 Lc[%d] p%d j%d", i,p,j);
 
+    /* ---- an out-of-vocabulary token id ends the resume at that record: the
+     * \x02MORE path re-embeds hist[len-1], so it must never be out of range ---- */
+    { int bad[5]={11,22,-7,44,55}, bad2[5]={11,22,33,44,256};
+      int got[16]={0};
+      if(m.kv->disk_fp){ fclose(m.kv->disk_fp); m.kv->disk_fp=NULL; }
+      remove(PATH); m.kv->disk_nrec=0;
+      kv_disk_append(&m,bad,NP);
+      kv_alloc(&m,16); m.kv->disk_nrec=0;
+      CHECK(kv_disk_load(&m,got,16)==2, "negative token id must stop the resume at record 2");
+      CHECK(m.kv->disk_nrec==2, "disk_nrec follows the kept prefix, got %d", m.kv->disk_nrec);
+      CHECK(got[0]==11 && got[1]==22, "the records before the bad one survive");
+      if(m.kv->disk_fp){ fclose(m.kv->disk_fp); m.kv->disk_fp=NULL; }
+      remove(PATH); m.kv->disk_nrec=0;
+      kv_disk_append(&m,bad2,NP);                     /* vocab=256: 256 is one past the end */
+      kv_alloc(&m,16); m.kv->disk_nrec=0;
+      CHECK(kv_disk_load(&m,got,16)==4, "token id == vocab must stop the resume at record 4");
+      /* restore the v1 file the next section starts from */
+      if(m.kv->disk_fp){ fclose(m.kv->disk_fp); m.kv->disk_fp=NULL; }
+      remove(PATH); m.kv->disk_nrec=0;
+      for(int i=0;i<m.c.n_layers;i++) for(int p=0;p<NP;p++){
+          for(int j=0;j<m.c.kv_lora;j++) m.Lc[i][(int64_t)p*m.c.kv_lora+j]=fill(i,p,j);
+          for(int j=0;j<m.c.qk_rope;j++) m.Rc[i][(int64_t)p*m.c.qk_rope+j]=fill(i+9,p,j);
+      }
+      kv_disk_append(&m,hist,NP);
+      CHECK(m.kv->disk_nrec==NP, "v1 file restored"); }
+
     /* ---- v1 file + KV8: quantize-on-load; il file v1 resta INTATTO (un crash
      * prima del primo save non deve perdere la conversazione) ---- */
     if(m.kv->disk_fp){ fclose(m.kv->disk_fp); m.kv->disk_fp=NULL; }  /* "riavvio" del processo */

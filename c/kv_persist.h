@@ -166,7 +166,16 @@ static int kv_disk_load(Model *m, int *hist, int maxctx){
     /* v1 f32 sotto KV8/KV_TQ: righe f32 lette in staging e quantizzate al volo */
     float *stage = ((g_kv8||g_tq)&&dt==0) ? falloc(c->kv_lora>c->qk_rope?c->kv_lora:c->qk_rope) : NULL;
     for(int p=0;p<nrec;p++){
-        int32_t tk; if(fread(&tk,4,1,f)!=1){ nrec=p; break; } hist[p]=tk;
+        int32_t tk; if(fread(&tk,4,1,f)!=1){ nrec=p; break; }
+        /* Un id fuori dal vocabolario non l'ha scritto questo modello: il file e'
+         * corrotto da qui in poi. Come per una lettura corta si tiene il prefisso
+         * sano. Non e' cosmetico: \x02MORE ri-forwarda hist[len-1], e un id fuori
+         * range indicizzerebbe la tabella degli embedding fuori dai limiti. */
+        if(tk<0 || tk>=c->vocab){
+            fprintf(stderr,"[KV] .coli_kv record %d holds token id %d outside the vocabulary (%d): "
+                    "keeping the %d record(s) before it\n", p, tk, c->vocab, p);
+            nrec=p; break; }
+        hist[p]=tk;
         for(int i=0;i<c->n_layers;i++){
             if(dt==2){                                /* v3: byte polari + raggio, gia' nel formato in RAM */
                 int lbb=coli_kvq_row_bytes(c->kv_lora,g_tq_bits,g_tq_codec), rbb=coli_kvq_row_bytes(c->qk_rope,g_tq_bits,g_tq_codec);
