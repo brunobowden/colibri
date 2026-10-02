@@ -1956,11 +1956,27 @@ QWEN38_IMAGE_PAD = "<|image_pad|>"
 QWEN38_VISION_END = "<|vision_end|>"
 
 
+def _image_tools():
+    """Make the image preprocessors in tools/ importable, and check what they need.
+
+    Two things the per-call version got wrong. It inserted tools/ into sys.path on every
+    image request, so a long-running server grew the list by one entry per image, and
+    every later import that misses sys.modules walks all of it. And it caught ImportError
+    around the import of the preprocessor, but the preprocessors import Pillow and numpy
+    only when called -- glm53_image lets the ImportError out (a 500 "engine failed"), and
+    qwen38_image and dsv41_image turn it into SystemExit, which ends the handler thread
+    without a response. Checking the two packages here is what makes the 400 below the
+    answer a client actually gets."""
+    tools = str(HERE / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import numpy  # noqa: F401
+    import PIL.Image  # noqa: F401
+
+
 def _preprocess_qwen38_image(data, model_dir, max_tokens=None):
     try:
-        import sys as _sys
-        from pathlib import Path as _Path
-        _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+        _image_tools()
         from qwen38_image import preprocess
     except ImportError as problem:
         raise APIError(400, f"image support needs Pillow and numpy ({problem}).",
@@ -2077,9 +2093,7 @@ def expand_dsv41_images(messages, model_dir, max_tokens=None):
 
 def _preprocess_dsv41_image(data, model_dir, max_tokens=None):
     try:
-        import sys as _sys
-        from pathlib import Path as _Path
-        _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+        _image_tools()
         from dsv41_image import preprocess
     except ImportError as problem:
         raise APIError(400, f"image support needs Pillow and numpy ({problem}).",
@@ -2091,9 +2105,7 @@ def _preprocess_image(data, model_dir):
     """L'immagine nelle patch che la torre vuole. Il lavoro sta in
     tools/glm53_image.py, verificato contro il processore ufficiale."""
     try:
-        import sys as _sys
-        from pathlib import Path as _Path
-        _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+        _image_tools()
         from glm53_image import preprocess
     except ImportError as problem:
         raise APIError(400, f"image support needs Pillow and numpy ({problem}).",
