@@ -4175,17 +4175,30 @@ class APIHandler(BaseHTTPRequestHandler):
 
     LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
 
+    @staticmethod
+    def _secret_equal(presented, expected):
+        """Constant-time comparison of a header value against the configured secret.
+
+        hmac.compare_digest() accepts str only when both sides are ASCII; anything else
+        raises TypeError. Comparing the strings directly therefore let one non-ASCII byte in
+        an Authorization or x-api-key header -- sent by anyone, before auth -- escape as an
+        unhandled exception: GET dropped the connection with a traceback in the log, POST
+        answered 500 "engine failed". Compare bytes instead. http.client decodes header
+        values as ISO-8859-1, so encoding them back recovers the bytes on the wire."""
+        import hmac
+        return hmac.compare_digest(presented.encode("latin-1", "replace"),
+                                   expected.encode("utf-8"))
+
     def _is_authed(self):
         """True if no key is configured, or a correct key was presented. Anthropic clients
         (Claude Code, the Anthropic SDKs) authenticate with `x-api-key`, not `Bearer` — both
         are accepted, and both are compared in constant time."""
         if not self.server.api_key:
             return True
-        import hmac
-        if hmac.compare_digest(self.headers.get("Authorization", ""),
-                               f"Bearer {self.server.api_key}"):
+        if self._secret_equal(self.headers.get("Authorization", ""),
+                              f"Bearer {self.server.api_key}"):
             return True
-        return hmac.compare_digest(self.headers.get("x-api-key", ""), self.server.api_key)
+        return self._secret_equal(self.headers.get("x-api-key", ""), self.server.api_key)
 
     def require_auth(self):
         if not self._is_authed():
@@ -5553,6 +5566,13 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
     pending_family = family
     pending_model_id = model_id
     pending_engine = engine
+    if api_key and not api_key.isascii():
+        # Clients disagree on how to put a non-ASCII secret in a header (urllib and
+        # browsers send ISO-8859-1, curl sends the terminal's UTF-8), so such a key would
+        # authenticate some clients and silently 401 others. Bearer tokens are ASCII
+        # (RFC 6750); say so at startup instead of after the model has loaded.
+        print("refusing to start: COLI_API_KEY / --api-key must be ASCII", file=sys.stderr)
+        sys.exit(1)
     if host not in ("127.0.0.1", "localhost", "::1") and not api_key:
         # (#SEC-6) Fail closed: an unauthenticated engine on a non-loopback bind exposes
         # a compute-heavy API to the network. Refuse unless explicitly overridden.

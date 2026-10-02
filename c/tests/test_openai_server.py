@@ -600,6 +600,14 @@ class ProtocolTest(unittest.TestCase):
         finally:
             listener.close()
 
+    def test_non_ascii_api_key_fails_before_engine_start(self):
+        with patch("openai_server.subprocess.Popen") as popen, \
+             patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit):
+                serve("/missing", port=1, api_key="clé")
+        popen.assert_not_called()
+        self.assertIn("must be ASCII", stderr.getvalue())
+
 
 class GenerationMetricsTest(unittest.TestCase):
     def setUp(self):
@@ -1792,6 +1800,31 @@ class HTTPTest(unittest.TestCase):
             self.request("/v1/models", key="wrong")
         self.addCleanup(caught.exception.close)
         self.assertEqual(caught.exception.code, 401)
+
+    def test_non_ascii_credentials_are_a_mismatch_not_a_crash(self):
+        """hmac.compare_digest raises TypeError on non-ASCII str. A stray byte in either
+        auth header, from an unauthenticated client, used to drop GET connections with no
+        response and turn POSTs into a 500 'engine failed'."""
+        def send(method, path, headers, body=None):
+            conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+            self.addCleanup(conn.close)
+            conn.request(method, path, body=body, headers=headers)  # str headers go out latin-1
+            response = conn.getresponse()
+            return response.status, response.read()
+
+        for name, value in (("Authorization", "Bearer sécret"), ("x-api-key", "sécret")):
+            with self.subTest(header=name):
+                status, payload = send("GET", "/health", {name: value})
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(payload), {"status": "ok"})   # liveness only
+                status, _ = send("GET", "/v1/models", {name: value})
+                self.assertEqual(status, 401)
+                body = json.dumps({"model": "test-model",
+                                   "messages": [{"role": "user", "content": "hi"}]})
+                status, payload = send("POST", "/v1/chat/completions",
+                                       {name: value, "Content-Type": "application/json"}, body)
+                self.assertEqual(status, 401)
+                self.assertEqual(json.loads(payload)["error"]["code"], "invalid_api_key")
 
     def test_metrics_counts_http_engine_failure_without_success(self):
         before = self.server.scheduler.snapshot()
