@@ -52,6 +52,9 @@ typedef struct {
                                                  * id_added, che copre anche <think>/<tool_call> ("special"
                                                  * false), i quali sono testo vero e vanno renderizzati. */
     Special *sp; int nsp;                       /* added tokens, ordinati per lunghezza decrescente */
+    uint8_t sp_first[256];                      /* 1 = qualche added token inizia con questo byte:
+                                                 * tok_encode salta senza memcmp le posizioni
+                                                 * da cui nessun added token puo' partire */
     jval *json_root;                            /* owns borrowed vocab/special strings */
     uint32_t byte2cp[256]; int byte2cp_len[256]; char byte2str[256][3];
     int16_t cp2byte[1024];
@@ -215,6 +218,7 @@ static void tok_load(Tok *T, const char *path){
             if(sf && sf->t==J_BOOL && sf->boolean) T->id_special[id]=1;
         }
         qsort(T->sp,T->nsp,sizeof(Special),cmp_sp_len);   /* match piu' lungo per primo */
+        for(int i=0;i<T->nsp;i++) if(T->sp[i].len>0) T->sp_first[(unsigned char)T->sp[i].str[0]]=1;
     }
     /* pre_tokenizer family: the o200k Split regex is recognizable by its
      * case-category classes (\p{Lu}...) which cl100k does not use */
@@ -594,6 +598,10 @@ static int tok_encode(Tok *T, const char *text, int len, int *out, int max){
         /* prossima occorrenza di un added-token a partire da >= i (match piu' lungo) */
         int hitpos=-1, hitlen=0, hitid=-1;
         for(int j=i;j<len && hitpos<0;j++){
+            /* Most bytes cannot start any added token (they nearly all begin with
+             * '<'), so skip the per-token memcmp there: with a few hundred added
+             * tokens that scan was most of the encode time on long prompts. */
+            if(!T->sp_first[p[j]]) continue;
             for(int k=0;k<T->nsp;k++){
                 int sl=T->sp[k].len;
                 if(sl>0 && j+sl<=len && !memcmp(p+j,T->sp[k].str,sl)){ hitpos=j; hitlen=sl; hitid=T->sp[k].id; break; }
