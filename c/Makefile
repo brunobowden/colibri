@@ -1321,6 +1321,9 @@ tests/test_tok_o200k$(EXE): tests/test_tok_o200k.c tok.h tok_unicode.h tok_unico
 tests/test_tok_gpt2$(EXE): tests/test_tok_gpt2.c tok.h tok_unicode.h tok_unicode_o200k.h json.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+tests/test_tok_bpe$(EXE): tests/test_tok_bpe.c tok.h tok_unicode.h tok_unicode_o200k.h json.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 tests/test_k3_ram_budget$(EXE): tests/test_k3_ram_budget.c sse41_kernels.h kimi_k3.c st.h tok.h quant.h fp8_format.h idot.h compat.h omp_tune.h route_trace.h kv_prefix.h serve_codec.h $(VK_OBJ)
 	$(CC) $(CFLAGS) $< $(VK_OBJ) -o $@ $(LDFLAGS)
 
