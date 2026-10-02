@@ -14,16 +14,27 @@ services:
       dockerfile: docker/Dockerfile.slim
     image: colibri
     ports:
-      - "5000:5000"
+      # Published on the host's loopback only. The server has no API key unless
+      # you set COLI_API_KEY, so it must not be reachable from the LAN by default.
+      # To serve other machines: set COLI_API_KEY and publish "5000:5000".
+      - "127.0.0.1:5000:5000"
     volumes:
       - "${MODEL_DIR:?set MODEL_DIR to the int4 model directory}:/model:ro"
     environment:
       # RAM budget in GB: more cached experts = faster. Size to the host.
       COLI_RAM: "${COLI_RAM:-24}"
+      # Optional bearer token; empty means no auth.
+      COLI_API_KEY: "${COLI_API_KEY:-}"
+      # The server refuses a non-loopback bind without a key (#SEC-6). Inside the
+      # container it has to bind 0.0.0.0 to be reachable through the port mapping
+      # at all; the loopback-only publish above is what keeps it local.
+      COLI_ALLOW_INSECURE_BIND: "1"
     command:
       - serve
       - --host
       - 0.0.0.0
+      - --port
+      - "5000"
       - --model-id
       - glm-5.2
       - --ram
