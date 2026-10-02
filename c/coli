@@ -2166,12 +2166,15 @@ def cmd_cluster_worker(a):
     node_id=a.node_id or f"{host}:{a.port}"
     stop_heartbeat=threading.Event()
     if coordinator:
-        from cluster import heartbeat, register
-        register(coordinator, {"node_id":node_id, "host":host, "port":a.port,
-                               "role":"expert", "layers":a.layers})
+        from cluster import heartbeat_or_register, register
+        node={"node_id":node_id, "host":host, "port":a.port, "role":"expert", "layers":a.layers}
+        register(coordinator, node)
         def keep_registered():
+            # heartbeat_or_register, not a bare heartbeat: after a coordinator
+            # restart the heartbeat is refused, and this loop used to swallow
+            # that forever with the worker gone from the topology.
             while not stop_heartbeat.wait(10):
-                try: heartbeat(coordinator, node_id)
+                try: heartbeat_or_register(coordinator, node)
                 except OSError: pass
         threading.Thread(target=keep_registered, name="colibri-cluster-heartbeat", daemon=True).start()
     e=env_for(a)
