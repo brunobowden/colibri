@@ -516,9 +516,16 @@ Run — the model is bind-mounted at `/model`, never baked in:
 ```bash
 docker run --rm -v /nvme/glm52_i4:/model colibri info
 docker run --rm -it -v /nvme/glm52_i4:/model colibri chat --ram 24
-docker run --rm -p 5000:5000 -v /nvme/glm52_i4:/model colibri \
-    serve --host 0.0.0.0 --model-id glm-5.2 --ram 24
+docker run --rm -p 127.0.0.1:5000:5000 -e COLI_ALLOW_INSECURE_BIND=1 \
+    -v /nvme/glm52_i4:/model colibri \
+    serve --host 0.0.0.0 --port 5000 --model-id glm-5.2 --ram 24
 ```
+
+Inside a container the server has to bind `0.0.0.0` to be reachable through the
+port mapping, and it refuses a non-loopback bind without `COLI_API_KEY` unless
+`COLI_ALLOW_INSECURE_BIND=1` is set. Publishing on `127.0.0.1` keeps that
+unauthenticated port on this machine; set `COLI_API_KEY` before publishing it
+anywhere else.
 
 **Reaching it from another machine (or `coli web`).** Binding `--host 0.0.0.0`
 is not enough: the server has a DNS-rebinding guard that only trusts the Host
